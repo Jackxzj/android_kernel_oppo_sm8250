@@ -160,4 +160,11 @@ static inline bool zram_dedup_enabled(struct zram *zram)
 }
 
 void zram_entry_free(struct zram *zram, struct zram_entry *entry);
+
+#ifdef CONFIG_ZRAM_WRITEBACK
+void ksys_sync(void);
+#endif
+#ifdef CONFIG_ZWB_HANDLE
+extern struct task_struct *zwb_clear_tsk;
+#endif
 #endif

@@ -229,16 +229,40 @@ static ssize_t modes_show(struct device *device,
 	return written;
 }
 
+extern bool dsi_panel_need_rewrite_reg;
+
+static ssize_t panel_flag_store(struct device *device,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	if (sysfs_streq(buf, "1")){
+		dsi_panel_need_rewrite_reg = 1;
+	}else{
+		dsi_panel_need_rewrite_reg = 0;
+	}
+
+	return 0;
+}
+
+static ssize_t panel_flag_show(struct device *device,
+				struct device_attribute *attr,
+				char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%d\n", dsi_panel_need_rewrite_reg);
+}
+
 static DEVICE_ATTR_RW(status);
 static DEVICE_ATTR_RO(enabled);
 static DEVICE_ATTR_RO(dpms);
 static DEVICE_ATTR_RO(modes);
+static DEVICE_ATTR_RW(panel_flag);
 
 static struct attribute *connector_dev_attrs[] = {
 	&dev_attr_status.attr,
 	&dev_attr_enabled.attr,
 	&dev_attr_dpms.attr,
 	&dev_attr_modes.attr,
+	&dev_attr_panel_flag.attr,
 	NULL
 };
 

@@ -104,7 +104,7 @@
 #define STALE_TIMEOUT		(16)
 #define STALE_COUNT		(DEFAULT_BITS_PER_CHAR * STALE_TIMEOUT)
 #define SEC_TO_USEC		(1000000)
-#define STALE_DELAY		(1000) //10msec
+#define SYSTEM_DELAY		(500)
 #define DEFAULT_BITS_PER_CHAR	(10)
 #define GENI_UART_NR_PORTS	(15)
 #define GENI_UART_CONS_PORTS	(1)
@@ -270,8 +270,6 @@ static void msm_geni_serial_set_manual_flow(bool enable,
 static bool handle_rx_dma_xfer(u32 s_irq_status, struct uart_port *uport);
 static int uart_line_id;
 
-static bool is_earlycon;
-
 #define GET_DEV_PORT(uport) \
 	container_of(uport, struct msm_geni_serial_port, uport)
 
@@ -321,14 +319,7 @@ static int msm_geni_serial_spinlocked(struct uart_port *uport)
 static void msm_geni_serial_enable_interrupts(struct uart_port *uport)
 {
 	unsigned int geni_m_irq_en, geni_s_irq_en;
-	struct msm_geni_serial_port *port = NULL;
-
-	/*
-	 * Earlyconsole also uses this API and finds port is NULL,
-	 * hence add a protective check.
-	 */
-	if (!is_earlycon)
-		port = GET_DEV_PORT(uport);
+	struct msm_geni_serial_port *port = GET_DEV_PORT(uport);
 
 	geni_m_irq_en = geni_read_reg_nolog(uport->membase,
 						SE_GENI_M_IRQ_EN);
@@ -340,7 +331,7 @@ static void msm_geni_serial_enable_interrupts(struct uart_port *uport)
 
 	geni_write_reg_nolog(geni_m_irq_en, uport->membase, SE_GENI_M_IRQ_EN);
 	geni_write_reg_nolog(geni_s_irq_en, uport->membase, SE_GENI_S_IRQ_EN);
-	if (port && port->xfer_mode == SE_DMA) {
+	if (port->xfer_mode == SE_DMA) {
 		geni_write_reg_nolog(DMA_TX_IRQ_BITS, uport->membase,
 							SE_DMA_TX_IRQ_EN_SET);
 		geni_write_reg_nolog(DMA_RX_IRQ_BITS, uport->membase,
@@ -428,6 +419,20 @@ bool geni_wait_for_cmd_done(struct uart_port *uport, bool is_irq_masked)
 
 	return timeout ? 0 : 1;
 }
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+static struct pinctrl *serial_pinctrl = NULL;
+static struct pinctrl_state *serial_pinctrl_state_disable = NULL;
+#endif
+#ifdef OPLUS_FEATURE_CHG_BASIC
+extern bool oem_disable_uart(void);
+bool boot_with_console(void)
+{
+	return !oem_disable_uart();
+}
+
+EXPORT_SYMBOL(boot_with_console);
+#endif
 
 static void msm_geni_serial_config_port(struct uart_port *uport, int cfg_flags)
 {
@@ -965,6 +970,12 @@ __msm_geni_serial_console_write(struct uart_port *uport, const char *s,
 	int bytes_to_send = count;
 	int fifo_depth = DEF_FIFO_DEPTH_WORDS;
 	int tx_wm = DEF_TX_WM;
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	if (!boot_with_console()) {
+		return;
+	}
+#endif
 
 	for (i = 0; i < count; i++) {
 		if (s[i] == '\n')
@@ -1520,9 +1531,9 @@ static int stop_rx_sequencer(struct uart_port *uport)
 	struct msm_geni_serial_port *port = GET_DEV_PORT(uport);
 	unsigned long flags = 0;
 	bool is_rx_active;
+	unsigned int stale_delay;
 	u32 dma_rx_status, s_irq_status;
 	int usage_count;
-	int iter = 0;
 
 	IPC_LOG_MSG(port->ipc_log_misc, "%s\n", __func__);
 
@@ -1539,16 +1550,15 @@ static int stop_rx_sequencer(struct uart_port *uport)
 		if (!port->bypass_flow_control)
 			msm_geni_serial_set_manual_flow(false, port);
 		/*
-		 * Wait for the stale timeout around 10msec to happen
-		 * if there is any data pending in the rx fifo.
-		 * This will help to handle incoming rx data in
-		 * stop_rx_sequencer for interrupt latency or
-		 * system delay cases.
+		 * Wait for the stale timeout to happen if there
+		 * is any data pending in the rx fifo.
+		 * Have a safety factor of 2 to include the interrupt
+		 * and system latencies, add 500usec delay for interrupt
+		 * latency or system delay.
 		 */
-		while (iter < STALE_DELAY) {
-			iter++;
-			udelay(10);
-		}
+		stale_delay = (STALE_COUNT * SEC_TO_USEC) / port->cur_baud;
+		stale_delay = (2 * stale_delay) + SYSTEM_DELAY;
+		udelay(stale_delay);
 
 		dma_rx_status = geni_read_reg_nolog(uport->membase,
 						SE_DMA_RX_IRQ_STAT);
@@ -1567,6 +1577,7 @@ static int stop_rx_sequencer(struct uart_port *uport)
 			IPC_LOG_MSG(port->ipc_log_misc, "%s: Interrupt delay\n",
 					 __func__);
 			handle_rx_dma_xfer(s_irq_status, uport);
+
 			if (!port->ioctl_count) {
 				usage_count = atomic_read(
 						&uport->dev->power.usage_count);
@@ -1738,6 +1749,15 @@ static int handle_rx_hs(struct uart_port *uport,
 	tty_flip_buffer_push(tport);
 	dump_ipc(msm_port->ipc_log_rx, "Rx", (char *)msm_port->rx_fifo, 0,
 								rx_bytes);
+
+       
+	/*
+	 * DMA_DONE interrupt doesn't confirm that the DATA is copied to
+	 * DDR memory, sometimes we are queuing the stale data from previous
+	 * transfer to tty flip_buffer, adding memset to zero
+	 * change to idenetify such scenario.
+	 */
+	memset(msm_port->rx_buf, 0, rx_bytes);
 	return ret;
 }
 
@@ -1946,6 +1966,9 @@ static int msm_geni_serial_handle_dma_rx(struct uart_port *uport, bool drop_rx)
 	tty_flip_buffer_push(tport);
 	dump_ipc(msm_port->ipc_log_rx, "DMA Rx", (char *)msm_port->rx_buf, 0,
 								rx_bytes);
+	//ADD for collecting btfw crash log
+	memset(msm_port->rx_buf, 0, DMA_RX_BUF_SIZE);
+	dump_ipc(msm_port->ipc_log_rx, "DMA Rx after memset", (char *)msm_port->rx_buf, 0, rx_bytes);
 
 	/*
 	 * DMA_DONE interrupt doesn't confirm that the DATA is copied to
@@ -2967,7 +2990,6 @@ msm_geni_serial_earlycon_setup(struct earlycon_device *dev,
 	unsigned long clk_rate;
 	unsigned long cfg0, cfg1;
 
-	is_earlycon = true;
 	if (!uport->membase) {
 		ret = -ENOMEM;
 		goto exit_geni_serial_earlyconsetup;
@@ -3285,6 +3307,30 @@ exit_ver_info:
 	return ret;
 }
 
+#ifdef OPLUS_FEATURE_CHG_BASIC
+static bool oplus_charge_id_reconfig(struct platform_device *pdev, struct uart_driver *drv)
+{
+	//TODO: add charger id control here
+	if (drv == &msm_geni_console_driver) {
+		pr_err("%s: console start get pinctrl\n", __FUNCTION__);
+		serial_pinctrl = devm_pinctrl_get(&pdev->dev);
+		if (IS_ERR_OR_NULL(serial_pinctrl)) {
+			dev_err(&pdev->dev, "No serial_pinctrl config specified!\n");
+		} else {
+			serial_pinctrl_state_disable =
+			pinctrl_lookup_state(serial_pinctrl, PINCTRL_SLEEP);
+			if (IS_ERR_OR_NULL(serial_pinctrl_state_disable)) {
+				dev_err(&pdev->dev, "No serial_pinctrl_state_disable config specified!\n");
+			} else {
+				pinctrl_select_state(serial_pinctrl, serial_pinctrl_state_disable);
+			}
+		}
+		return true;
+	}
+	return false;
+}
+#endif
+
 static int msm_geni_serial_probe(struct platform_device *pdev)
 {
 	int ret = 0;
@@ -3308,6 +3354,13 @@ static int msm_geni_serial_probe(struct platform_device *pdev)
 								__func__);
 		return -ENODEV;
 	}
+	
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	if (!boot_with_console() && oplus_charge_id_reconfig(pdev, drv)) { 
+		return -ENODEV; 
+	}
+#endif
 
 	if (pdev->dev.of_node) {
 		if (drv->cons) {
@@ -3575,13 +3628,6 @@ static int msm_geni_serial_probe(struct platform_device *pdev)
 	if (!uart_console(uport))
 		spin_lock_init(&dev_port->rx_lock);
 
-	/*
-	 * Earlyconsole to kernel console will switch happen after
-	 * uart_add_one_port. Hence marking is_earlycon to false here.
-	 */
-	if (is_console)
-		is_earlycon = false;
-
 	IPC_LOG_MSG(dev_port->ipc_log_misc, "%s: port:%s irq:%d\n", __func__,
 		    uport->name, uport->irq);
 
@@ -3838,6 +3884,12 @@ static int __init msm_geni_serial_init(void)
 		msm_geni_console_port.uport.flags = UPF_BOOT_AUTOCONF;
 		msm_geni_console_port.uport.line = i;
 	}
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	if (!boot_with_console()) {
+		msm_geni_console_driver.cons = NULL;
+	}
+#endif
 
 	ret = console_register(&msm_geni_console_driver);
 	if (ret)

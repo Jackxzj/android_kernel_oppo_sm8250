@@ -486,6 +486,16 @@ static struct device_attribute power_supply_attrs[] = {
 	POWER_SUPPLY_ATTR(charger_status),
 	/* Local extensions of type int64_t */
 	POWER_SUPPLY_ATTR(charge_counter_ext),
+	// add by huangtongfeng  for wireless file
+	POWER_SUPPLY_ATTR(tx_voltag_now),
+	POWER_SUPPLY_ATTR(tx_current_now),
+	POWER_SUPPLY_ATTR(cp_voltage_now),
+	POWER_SUPPLY_ATTR(cp_current_now),
+	POWER_SUPPLY_ATTR(wireless_mode),
+	POWER_SUPPLY_ATTR(wireless_type),
+	POWER_SUPPLY_ATTR(cep_info),
+	POWER_SUPPLY_ATTR(ble_mac_addr),
+	// wireless file  end
 	/* Properties of type `const char *' */
 	POWER_SUPPLY_ATTR(model_name),
 	POWER_SUPPLY_ATTR(manufacturer),

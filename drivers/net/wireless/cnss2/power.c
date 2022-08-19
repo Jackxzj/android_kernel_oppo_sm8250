@@ -8,6 +8,7 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/regulator/consumer.h>
 #include <soc/qcom/cmd-db.h>
+#include <linux/of_gpio.h>
 
 #include "main.h"
 #include "debug.h"
@@ -800,6 +801,7 @@ static int cnss_select_pinctrl_enable(struct cnss_plat_data *plat_priv)
 	int ret = 0, bt_en_gpio = plat_priv->pinctrl_info.bt_en_gpio;
 	u8 wlan_en_state = 0;
 
+
 	if (bt_en_gpio < 0)
 		goto set_wlan_en;
 
@@ -818,6 +820,7 @@ static int cnss_select_pinctrl_enable(struct cnss_plat_data *plat_priv)
 			return ret;
 		wlan_en_state = 1;
 	}
+
 	if (!gpio_get_value(bt_en_gpio)) {
 		cnss_pr_dbg("BT_EN_GPIO State: Off. Delay WLAN_GPIO enable\n");
 		/* check for BT_EN_GPIO down race during above operation */
@@ -826,6 +829,7 @@ static int cnss_select_pinctrl_enable(struct cnss_plat_data *plat_priv)
 			cnss_select_pinctrl_state(plat_priv, false);
 			wlan_en_state = 0;
 		}
+		/* 100 ms delay for BT_EN and WLAN_EN QCA6490 PMU sequencing */
 		/* 100 ms delay for BT_EN and WLAN_EN QCA6490/QCA6390 PMU
 		 * sequencing.
 		 */
